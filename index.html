@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Blitz S0 Live Leaderboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Courier New', monospace;
+      background: #0a0a0f;
+      color: #e0e0e0;
+      padding: 16px;
+      min-height: 100vh;
+    }
+    .widget {
+      max-width: 600px;
+      margin: 0 auto;
+      border: 1px solid #2a2a3a;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .header {
+      background: #12121f;
+      padding: 12px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid #2a2a3a;
+    }
+    .header h1 { font-size: 14px; color: #a0a0ff; letter-spacing: 1px; text-transform: uppercase; }
+    .header .meta { font-size: 11px; color: #606080; }
+    .status { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: #40ff80; animation: pulse 2s infinite; }
+    .dot.loading { background: #ffaa40; animation: none; }
+    .dot.error { background: #ff4040; animation: none; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+    table { width: 100%; border-collapse: collapse; }
+    th {
+      background: #0f0f1a;
+      padding: 8px 12px;
+      font-size: 11px;
+      color: #606080;
+      text-align: left;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      border-bottom: 1px solid #1a1a2a;
+    }
+    td { padding: 9px 12px; font-size: 13px; border-bottom: 1px solid #111118; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #111118; }
+    .rank { color: #606080; font-size: 12px; width: 36px; }
+    .rank-1 { color: #ffd700; font-weight: bold; }
+    .rank-2 { color: #c0c0c0; }
+    .rank-3 { color: #cd7f32; }
+    .player { color: #e0e0ff; }
+    .paid-yes { color: #40ff80; font-size: 11px; }
+    .paid-no { color: #ff4060; font-size: 11px; }
+    .lgc { color: #a0a0ff; }
+    .footer {
+      background: #0f0f1a;
+      padding: 8px 16px;
+      font-size: 10px;
+      color: #404060;
+      border-top: 1px solid #1a1a2a;
+      display: flex;
+      justify-content: space-between;
+    }
+    .empty { padding: 32px; text-align: center; color: #404060; font-size: 13px; }
+    .game-selector {
+      background: #12121f;
+      padding: 8px 16px;
+      border-bottom: 1px solid #2a2a3a;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .game-btn {
+      background: #1a1a2a;
+      border: 1px solid #2a2a3a;
+      color: #808090;
+      padding: 4px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+      font-family: monospace;
+    }
+    .game-btn:hover { border-color: #a0a0ff; color: #a0a0ff; }
+    .game-btn.active { background: #1e1e3a; border-color: #a0a0ff; color: #a0a0ff; }
+  </style>
+</head>
+<body>
+<div class="widget">
+  <div class="header">
+    <h1>Blitz S0 Leaderboard</h1>
+    <div class="status">
+      <div class="dot loading" id="dot"></div>
+      <span id="status-text">Loading...</span>
+    </div>
+  </div>
+  <div class="game-selector" id="game-selector"></div>
+  <table>
+    <thead>
+      <tr>
+        <th>Rank</th>
+        <th>Player</th>
+        <th>Prize</th>
+      </tr>
+    </thead>
+    <tbody id="leaderboard-body">
+      <tr><td colspan="3" class="empty">Loading game data...</td></tr>
+    </tbody>
+  </table>
+  <div class="footer">
+    <span>Source: Torii on-chain data</span>
+    <span id="updated-at">—</span>
+  </div>
+</div>
+
+<script>
+  const TORII_BASE = "https://api.cartridge.gg/x";
+  const MAX_GAME = 12;
+  let currentGame = null;
+  let availableGames = [];
+  let refreshTimer = null;
+
+  function decodeHexName(hex) {
+    try {
+      const h = hex.replace("0x", "").replace(/^0+/, "");
+      const padded = h.length % 2 ? "0" + h : h;
+      const bytes = new Uint8Array(padded.match(/.{2}/g).map(b => parseInt(b, 16)));
+      return new TextDecoder().decode(bytes).replace(/\x00/g, "").trim();
+    } catch { return hex.slice(0, 12) + "..."; }
+  }
+
+  async function toriiSql(game, query) {
+    const url = `${TORII_BASE}/s0-game-${game}/torii/sql?query=${encodeURIComponent(query)}`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    return res.json();
+  }
+
+  async function discoverGames() {
+    const games = [];
+    for (let g = 1; g <= MAX_GAME; g++) {
+      const rows = await toriiSql(g, "SELECT COUNT(*) as cnt FROM \"s1_eternum-PlayerRank\"");
+      if (rows && rows[0]?.cnt > 0) games.push(g);
+    }
+    return games;
+  }
+
+  async function loadLeaderboard(game) {
+    setStatus("loading", "Loading...");
+    try {
+      const [ranks, names] = await Promise.all([
+        toriiSql(game, "SELECT player, rank, paid FROM \"s1_eternum-PlayerRank\" ORDER BY rank ASC"),
+        toriiSql(game, "SELECT address, name FROM \"s1_eternum-AddressName\""),
+      ]);
+
+      if (!ranks || ranks.length === 0) {
+        setStatus("error", "No data");
+        document.getElementById("leaderboard-body").innerHTML =
+          `<tr><td colspan="3" class="empty">No data for Game ${game}</td></tr>`;
+        return;
+      }
+
+      const nameMap = {};
+      if (names) names.forEach(n => { nameMap[n.address] = decodeHexName(n.name); });
+
+      const tbody = document.getElementById("leaderboard-body");
+      tbody.innerHTML = ranks.map(r => {
+        const name = nameMap[r.player] || r.player.slice(0, 14) + "...";
+        const rankClass = r.rank <= 3 ? `rank-${r.rank}` : "rank";
+        const isLgc = name.startsWith("lgc");
+        const paidHtml = r.paid
+          ? `<span class="paid-yes">✓ paid</span>`
+          : `<span class="paid-no">—</span>`;
+        return `<tr>
+          <td class="${rankClass}">#${r.rank}</td>
+          <td class="player ${isLgc ? "lgc" : ""}">${name}</td>
+          <td>${paidHtml}</td>
+        </tr>`;
+      }).join("");
+
+      setStatus("live", `Game ${game} · ${ranks.length} players`);
+      document.getElementById("updated-at").textContent =
+        "Updated " + new Date().toLocaleTimeString();
+    } catch (e) {
+      setStatus("error", "Error loading data");
+    }
+  }
+
+  function setStatus(state, text) {
+    const dot = document.getElementById("dot");
+    dot.className = "dot" + (state === "loading" ? " loading" : state === "error" ? " error" : "");
+    document.getElementById("status-text").textContent = text;
+  }
+
+  function renderGameSelector() {
+    const el = document.getElementById("game-selector");
+    el.innerHTML = availableGames.map(g =>
+      `<button class="game-btn ${g === currentGame ? "active" : ""}" onclick="selectGame(${g})">G${g}</button>`
+    ).join("");
+  }
+
+  function selectGame(game) {
+    currentGame = game;
+    renderGameSelector();
+    if (refreshTimer) clearInterval(refreshTimer);
+    loadLeaderboard(game);
+    // Refresh every 60s for live games
+    refreshTimer = setInterval(() => loadLeaderboard(game), 60000);
+  }
+
+  async function init() {
+    setStatus("loading", "Discovering games...");
+    availableGames = await discoverGames();
+    if (availableGames.length === 0) {
+      setStatus("error", "No games found");
+      return;
+    }
+    currentGame = availableGames[availableGames.length - 1]; // default to latest
+    renderGameSelector();
+    loadLeaderboard(currentGame);
+    refreshTimer = setInterval(() => loadLeaderboard(currentGame), 60000);
+  }
+
+  init();
+</script>
+</body>
+</html>
